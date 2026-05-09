@@ -108,6 +108,9 @@ function Pause-ForKey {
     Write-Host ""
     Write-Host "  $Msg" -ForegroundColor DarkGray
     if ($global:QUIET_MODE) { return }
+    while ($Host.UI.RawUI.KeyAvailable) {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
     do { $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } while ($k.Character -eq [char]0 -or $k.VirtualKeyCode -in @(16,17,18))
 }
 
@@ -120,7 +123,14 @@ function Confirm-YN {
         Write-Host "$ans (quiet mode)" -ForegroundColor DarkGray
         return $DefaultYes
     }
-    do { $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } while ($k.Character -eq [char]0 -or $k.VirtualKeyCode -in @(16,17,18))
+    # Flush any buffered keypresses from previous ReadKey interactions
+    while ($Host.UI.RawUI.KeyAvailable) {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    # Now read the actual user intent
+    do {
+        $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    } while ($k.Character -eq [char]0 -or $k.VirtualKeyCode -in @(16,17,18))
     Write-Host $k.Character
     return ($k.Character -eq 'y' -or $k.Character -eq 'Y')
 }
@@ -167,29 +177,15 @@ function Download-File {
     param([string]$Url, [string]$Dest, [string]$Label = "")
     try {
         $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("User-Agent","DaServa-ServerManager/1.0")
-
-        $downloaded = 0
-        $total      = 0
-        $lastPct    = -1
-
-        $wc.add_DownloadProgressChanged({
-            param($s,$e)
-            $script:downloaded = $e.BytesReceived
-            $script:total      = $e.TotalBytesToReceive
-            $pct = if ($e.ProgressPercentage -ge 0) { $e.ProgressPercentage } else { 0 }
-            if ($pct -ne $script:lastPct) {
-                $script:lastPct = $pct
-                $bar  = "#" * [int]($pct/5) + "." * (20 - [int]($pct/5))
-                $recv = Format-Bytes $e.BytesReceived
-                $tot  = if ($e.TotalBytesToReceive -gt 0) { "/" + (Format-Bytes $e.TotalBytesToReceive) } else { "" }
-                Write-Host "`r     [$bar] $pct%  $recv$tot  $Label        " -NoNewline -ForegroundColor DarkCyan
-            }
-        })
-
-        $task = $wc.DownloadFileTaskAsync($Url, $Dest)
-        $task.Wait()
-        Write-Host "`r     [####################] 100%  $(Format-Bytes (Get-Item $Dest).Length)  $Label        " -ForegroundColor Green
+        $wc.Headers.Add("User-Agent", "DaServa-ServerManager/1.0")
+        if ($Label) {
+            Write-Host "     Downloading: $Label" -ForegroundColor DarkCyan -NoNewline
+        }
+        $wc.DownloadFile($Url, $Dest)
+        if ($Label) {
+            $size = (Get-Item $Dest).Length
+            Write-Host "`r     [OK] $(Format-Bytes $size)  $Label                    " -ForegroundColor Green
+        }
         return $true
     } catch {
         Write-Host ""
@@ -2074,7 +2070,7 @@ function Scan-ServerMods {
         }
 
         $enabledCount = ($result | Where-Object { $_.enabled }).Count
-        Write-OK "Detected $($detectedSlugs.Count) mods ($enabledCount matched to known mods)"
+        Write-OK "Identified $($detectedSlugs.Count) mod(s) in folder -- $enabledCount matched to default list, rest disabled"
         $unmatched = $jarFiles.Count - $foundProjectIds.Count
         if ($unmatched -gt 0) {
             Write-WARN "$unmatched jar(s) unrecognised (deps/custom) -- will be re-downloaded automatically"
@@ -2191,12 +2187,9 @@ function Manage-ServerMods {
     Write-Step "Scanning installed mods..." "Cyan"
     $baseMods = Scan-ServerMods -ServerDir $serverDir
 
-    # Check for profile in server dir
-    $profilePath = Join-Path $serverDir "mod_profile.json"
-    if ((Test-Path $profilePath) -and (Confirm-YN "Found a saved mod profile in server folder. Use it?")) {
-        $imported = Import-ModProfile -ProfilePath $profilePath
-        if ($imported) { $baseMods = $imported }
-    }
+    # Note: we intentionally do NOT offer profile import here --
+    # the scan result reflects what's actually installed, which is the right starting point.
+    # Profiles can be imported via Create Server instead.
 
     Write-Step "Mod Configuration" "Cyan"
     Pause-ForKey "Press any key to open the mod selector..."
